@@ -1,0 +1,122 @@
+name: Publish
+
+on:
+  push:
+    tags:
+      - '*'
+
+permissions:
+  contents: write
+
+jobs:
+  # Create the release before the binaries are uploaded to it, so that it
+  # carries notes rather than appearing bare. The notes come from the tag's
+  # own annotation, which keeps one source of truth: write the release notes
+  # in `git tag -a`, and they end up on GitHub unchanged.
+  release:
+    name: Create release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create release with notes from the tag annotation
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists, leaving its notes alone."
+            exit 0
+          fi
+
+          git fetch --force origin "refs/tags/$TAG:refs/tags/$TAG"
+
+          # Only an annotated tag carries a message of its own. For a
+          # lightweight tag the %(contents) fields fall through to the commit
+          # it points at, which is not what we want as release notes.
+          if [ "$(git for-each-ref --format='%(objecttype)' "refs/tags/$TAG")" = "tag" ]; then
+            SUBJECT=$(git tag -l --format='%(contents:subject)' "$TAG")
+            BODY=$(git tag -l --format='%(contents:body)' "$TAG")
+            # A subject that just repeats the tag name adds nothing under a
+            # heading that already says it, so prefer the body when there is one.
+            NOTES=${BODY:-$SUBJECT}
+          else
+            NOTES=""
+          fi
+
+          if [ -n "${NOTES//[[:space:]]/}" ]; then
+            printf '%s\n' "$NOTES" > release-notes.md
+            gh release create "$TAG" --title "$TAG" --notes-file release-notes.md
+          else
+            echo "Tag $TAG has no annotation, generating notes from commits."
+            gh release create "$TAG" --title "$TAG" --generate-notes
+          fi
+
+  publish:
+    name: Publish for ${{ matrix.os }}
+    needs: release
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        name: [
+            linux,
+            linux-musl,
+            macos
+        ]
+
+        include:
+          - name: linux
+            os: ubuntu-latest
+            artifact_name: target/release/methplotlib
+            asset_name: methplotlib-linux
+          - name: linux-musl
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            artifact_name: target/x86_64-unknown-linux-musl/release/methplotlib
+            asset_name: methplotlib-linux-musl
+            use_cross: true
+          - name: macos
+            os: macos-latest
+            artifact_name: target/release/methplotlib
+            asset_name: methplotlib-macos
+
+    steps:
+    - uses: actions/checkout@v1
+
+    - uses: actions-rs/toolchain@v1
+      with:
+        profile: minimal
+        toolchain: stable
+        target: ${{ matrix.target }}
+        override: true
+
+    - name: Install Cross
+      if: matrix.use_cross
+      run: |
+        cargo install cross --git https://github.com/cross-rs/cross
+
+    # Standard build for non-musl targets
+    - name: Build (Standard)
+      if: '!matrix.use_cross'
+      uses: actions-rs/cargo@v1
+      with:
+        command: build
+        args: --release ${{ matrix.target && format('--target {0}', matrix.target) || '' }} --locked
+
+    # Cross build for musl target
+    - name: Build (Cross)
+      if: matrix.use_cross
+      run: |
+        cross build --target ${{ matrix.target }} --release --locked
+
+    - name: Upload binaries to release
+      uses: svenstaro/upload-release-action@v2
+      with:
+        repo_token: ${{ secrets.GITHUB_TOKEN }}
+        file: ${{ matrix.artifact_name }}
+        asset_name: ${{ matrix.asset_name }}
+        tag: ${{ github.ref }}

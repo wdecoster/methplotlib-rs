@@ -1,0 +1,27 @@
+[package]
+name = "methplotlib-rs"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.87"
+authors = ["Wouter De Coster <decosterwouter@gmail.com>"]
+license = "MIT"
+description = "Plot nucleotide modifications from long-read sequencing"
+readme = "README.md"
+homepage = "https://github.com/wdecoster/methplotlib-rs"
+repository = "https://github.com/wdecoster/methplotlib-rs"
+keywords = ["nanopore", "methylation", "modification", "bioinformatics", "visualization"]
+categories = ["command-line-utilities", "science", "visualization"]
+
+[[bin]]
+name = "methplotlib"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+env_logger = "0.11"
+log = "0.4"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
