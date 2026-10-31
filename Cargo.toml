@@ -2,7 +2,7 @@
 name = "methplotlib-rs"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.87"
+rust-version = "1.92"
 authors = ["Wouter De Coster <decosterwouter@gmail.com>"]
 license = "MIT"
 description = "Plot nucleotide modifications from long-read sequencing"
@@ -20,8 +20,15 @@ path = "src/main.rs"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 env_logger = "0.11"
+flate2 = "1"
+kuva = { version = "0.6", features = ["png", "pdf"] }
 log = "0.4"
+noodles = { version = "0.119", features = ["bam", "cram", "sam", "bgzf", "csi", "tabix", "fasta", "core"] }
+ureq = "3.5.0"
 
 [profile.release]
 lto = "fat"
 codegen-units = 1
+
+[dev-dependencies]
+serde_json = "1"

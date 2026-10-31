@@ -1,10 +1,13 @@
-use anyhow::Result;
+use anyhow::{Result, bail};
 use clap::Parser;
 use log::info;
 
-mod region;
-
-use region::Region;
+use methplotlib_rs::annotation::{parse_annotation, parse_bed, resolve_annotation};
+use methplotlib_rs::frequency::{parse_bedgraph, parse_bedmethyl};
+use methplotlib_rs::plot::{Dataset, PlotOptions, make_scene, write_scene};
+use methplotlib_rs::reads::parse_alignments;
+use methplotlib_rs::region::{Region, Window};
+use methplotlib_rs::sniff::{FileType, file_type};
 
 /// Plot nucleotide modifications from long-read sequencing
 #[derive(Parser, Debug)]
@@ -22,7 +25,8 @@ struct Cli {
     #[arg(short, long)]
     window: String,
 
-    /// Add annotation from a gtf or gff file
+    /// Add annotation from a gtf or gff file,
+    /// or 'mane' for the MANE Select transcripts of GRCh38 (downloaded once)
     #[arg(short, long)]
     gtf: Option<String>,
 
@@ -43,6 +47,7 @@ struct Cli {
     split: bool,
 
     /// Rolling window size for averaging frequency values, counted in records
+    /// (both strands are separate records in bedMethyl)
     #[arg(long, default_value_t = 5)]
     smooth: usize,
 
@@ -58,26 +63,106 @@ struct Cli {
     #[arg(long, default_value_t = 20)]
     minqual: u8,
 
-    /// Output file, its extension (svg, png or pdf) sets the format.
+    /// Output file, its extension (png, svg or pdf) sets the format; svg gets large with many reads.
     /// Use {region} as a shorthand for {chr}_{start}_{end}.
-    /// Default: methylation_browser_{region}.svg
+    /// Default: methylation_browser_{region}.png
     #[arg(short, long)]
     outfile: Option<String>,
 }
 
+fn read_dataset(path: &str, name: &str, window: &Window, cli: &Cli) -> Result<Vec<Dataset>> {
+    let kind = file_type(path)?;
+    info!("File {path} is of type {kind:?}");
+    let mods = cli.mods.as_deref();
+    Ok(match kind {
+        FileType::Bam | FileType::Cram => parse_alignments(
+            path,
+            name,
+            window,
+            mods,
+            cli.fasta.as_deref(),
+            kind == FileType::Cram,
+        )?
+        .into_iter()
+        .map(Dataset::Reads)
+        .collect(),
+        FileType::BedMethylModkit | FileType::BedMethylModbam2bed => {
+            parse_bedmethyl(path, name, window, cli.smooth, kind, mods)?
+                .into_iter()
+                .map(Dataset::Frequencies)
+                .collect()
+        }
+        FileType::Bedgraph => parse_bedgraph(path, name, window)?
+            .into_iter()
+            .map(Dataset::Bedgraph)
+            .collect(),
+    })
+}
+
+fn output_path(cli: &Cli, window: &Window) -> Result<String> {
+    let path = match &cli.outfile {
+        Some(outfile) => outfile.replace("{region}", &window.label),
+        None => format!("methylation_browser_{}.png", window.label),
+    };
+    let lower = path.to_lowercase();
+    if ![".svg", ".png", ".pdf"]
+        .iter()
+        .any(|ext| lower.ends_with(ext))
+    {
+        bail!("unsupported output format for {path}: use a .svg, .png or .pdf extension");
+    }
+    Ok(path)
+}
+
 fn main() -> Result<()> {
-    env_logger::init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
     let cli = Cli::parse();
     if cli.names.len() != cli.methylation.len() {
-        anyhow::bail!(
+        bail!(
             "expecting the same number of --names ({}) as --methylation datasets ({})",
             cli.names.len(),
             cli.methylation.len()
         );
     }
-    let region = Region::parse(&cli.window)?;
-    info!("Plotting {region:?}");
-    anyhow::bail!("methplotlib-rs is under construction, plotting is not implemented yet")
+    let windows = Region::parse(&cli.window)?.windows(cli.fasta.as_deref())?;
+    let gtf = cli.gtf.as_deref().map(resolve_annotation).transpose()?;
+    let options = PlotOptions {
+        split: cli.split,
+        dotsize: f64::from(cli.dotsize),
+        minqual: cli.minqual,
+    };
+    for window in &windows {
+        info!(
+            "Processing {}:{}-{}",
+            window.chromosome, window.begin, window.end
+        );
+        let outfile = output_path(&cli, window)?;
+        let mut datasets = vec![];
+        for (path, name) in cli.methylation.iter().zip(&cli.names) {
+            datasets.extend(read_dataset(path, name, window, &cli)?);
+        }
+        if datasets.is_empty() {
+            bail!(
+                "no data found in {}:{}-{} for any of the input files!\n\
+                 Please check your --window and the chromosome names in your input.",
+                window.chromosome,
+                window.begin,
+                window.end
+            );
+        }
+        let transcripts = match &gtf {
+            Some(gtf) => parse_annotation(gtf, window, cli.simplify)?,
+            None => vec![],
+        };
+        let regions = match &cli.bed {
+            Some(bed) => parse_bed(bed, window)?,
+            None => vec![],
+        };
+        let scene = make_scene(datasets, transcripts, regions, window, &options);
+        write_scene(&scene, &outfile)?;
+        eprintln!("Wrote {outfile}");
+    }
+    Ok(())
 }
 
 #[cfg(test)]
